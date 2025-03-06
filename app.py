@@ -1,47 +1,31 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-from flask_cors import CORS, cross_origin
+from flask_cors import CORS
 from datetime import datetime
-import uuid
-from functools import wraps
 import mysql.connector
-
 from flask_mysqldb import MySQL
-from flask_login import login_required
-
-# # (TAMBAHAN API)
-# from kingdee_client import KingdeeClient
-# import logging
-
-# # (TAMBAHAN API)
-# logging.basicConfig(
-#     level=logging.DEBUG,  # Set the logging level
-#     format='%(levelname)s:(%(filename)s:%(lineno)d) - %(message)s'
-# )
+from functools import wraps
+import json
 
 app = Flask(__name__)
 
+# Konfigurasi database untuk Flask-MySQLdb
 app.config['MYSQL_HOST'] = 'localhost'
 app.config['MYSQL_USER'] = 'root'
 app.config['MYSQL_PASSWORD'] = ''
 app.config['MYSQL_DB'] = 'orderrequisition'
-app.config['MYSQL_CURSORCLASS'] = 'DictCursor'\
+app.config['MYSQL_CURSORCLASS'] = 'DictCursor'
 
 app.secret_key = 'your_secret_key'
-app.config['SESSION_COOKIE_SECURE'] = True  # Ensures cookies are only sent over HTTPS
-app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevents JavaScript access to cookies
-app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # For cross-site requests
 
-CORS(app, origins=["http://localhost:3000"], supports_credentials=True)  # Enable CORS to allow frontend requests
+# Inisialisasi MySQL
+mysql = MySQL(app)
 
-# Simulated Databases
-users = {
-    "admin": "001"  # User identifier for 'admin' is '001'
-}
+# CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
+CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
+users = {"admin": "001"}
+forms = []
 
-forms = []  # To store form submissions
-
-# Mapping Warehouse Names
 warehouse_mapping = {
     "Angsana": "IEL-KS-Angsana",
     "Sofifi": "IEL-MU-SFI",
@@ -49,7 +33,6 @@ warehouse_mapping = {
     "Jakarta": "JKT-JAV"
 }
 
-# Middleware: Protect Routes with Login
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -58,182 +41,131 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Helper function to generate a unique form number
-def generate_form_number(username):
-    today = datetime.now().strftime("%d%m%Y")
-    user_id = users.get(username, "000")  # Default to '000' if user ID not found
+# def get_inventory_status(part_number):
+#     conn = mysql.connection
+#     cursor = conn.cursor()
+#     query = """
+#         SELECT `Warehouse Name` AS warehouse, `Inventory Status` AS status
+#         FROM realtimeinventory WHERE `Material Code` = %s
+#     """
+#     cursor.execute(query, (part_number,))
+#     results = cursor.fetchall()
+#     cursor.close()
 
-    # Count existing forms for this user today
-    user_forms_today = [
-        f for f in forms if f["form_number"].startswith(f"{today}-{user_id}")
-    ]
-    form_count = len(user_forms_today) + 1
-    form_number = f"{today}-{user_id}-{form_count:03d}"  # 3-digit sequential number
-    return form_number
+#     inventory_status = {key: "Not Available" for key in warehouse_mapping}
 
-# Fungsi untuk mendapatkan inventory status dari database
-def get_inventory_status(part_number):
-    # Koneksi ke database
-    conn = mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="password",
-        database="orderrequisition"
-    )
-    cursor = conn.cursor(dictionary=True)
+#     for row in results:
+#         db_warehouse = row['warehouse'].strip()
+#         status = row['status']
+#         for key, value in warehouse_mapping.items():
+#             if db_warehouse == value:
+#                 inventory_status[key] = status
 
-    # Query untuk mendapatkan status inventory berdasarkan part_number dan warehouse
+#     return inventory_status
+def get_inventory_status(part_number, quantity):
+    conn = mysql.connection
+    cursor = conn.cursor()
+
+    inventory_status = {key: "Not Available" for key in warehouse_mapping}
+
+    # Cek di realtimeinventory
     query = """
-        SELECT 
-            `Warehouse Name` AS warehouse, 
-            `Inventory Status` AS status
-        FROM 
-            realtimeinventory
-        WHERE 
-            `Material Code` = %s
+        SELECT `Warehouse Name` AS warehouse, `Inventory Status` AS status, `Available Qty (CUoM)` AS available_qty
+        FROM realtimeinventory WHERE `Material Code` = %s
     """
     cursor.execute(query, (part_number,))
     results = cursor.fetchall()
 
-    # Menutup koneksi
-    cursor.close()
-    conn.close()
+    for row in results:
+        warehouse = row['warehouse'].strip()
+        status = row['status']
+        available_qty = row['available_qty']
 
-    # Default status jika tidak ditemukan di warehouse tertentu
-    inventory_status = {
-        "Jakarta": "Not Available",
-        "Sofifi": "Not Available",
-        "Kendari": "Not Available",
-        "Angsana": "Not Available"
-    }
+        for key, value in warehouse_mapping.items():
+            if warehouse == value:
+                if status == "Available":
+                    if available_qty >= quantity:
+                        inventory_status[key] = "Available"
+                    else:
+                        inventory_status[key] = f"Partial (Stock = {available_qty})"
+
+    # Jika tidak ditemukan di realtimeinventory, cek di transfermonitoring
+    query = """
+        SELECT `DESTINATION WAREHOUSE` AS warehouse, `ETA`
+        FROM transfermonitoring WHERE `PART NUMBER` = %s
+    """
+    cursor.execute(query, (part_number,))
+    results = cursor.fetchall()
 
     for row in results:
-        db_warehouse = row['warehouse'].strip()  # Menghapus spasi di awal/akhir
-        status = row['status']
+        warehouse = row['warehouse'].strip()
+        eta = row['ETA']
 
-        # Cek apakah warehouse dari database cocok dengan mapping
         for key, value in warehouse_mapping.items():
-            if db_warehouse == value:
-                inventory_status[key] = status
+            if warehouse == value:
+                inventory_status[key] = f"In-transit (ETA = {eta})"
 
-    return inventory_status
-
-def get_description(part_number):
-    # Koneksi ke database
-    conn = mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="password",
-        database="orderrequisition"
-    )
-    cursor = conn.cursor(dictionary=True)
-
-    # Query untuk mengambil deskripsi dari tabel datapn
+    # Jika tidak ditemukan di transfermonitoring, cek di etachina
     query = """
-        SELECT 
-            `English Name` AS description
-        FROM 
-            datapn
-        WHERE 
-            `code` = %s
-        LIMIT 1
+        SELECT `ETA`
+        FROM etachina WHERE `PART NUMBER` = %s
     """
     cursor.execute(query, (part_number,))
     result = cursor.fetchone()
 
-    # Menutup koneksi
-    cursor.close()
-    conn.close()
+    if result:
+        inventory_status["Jakarta"] = f"PO from China (ETA = {result['ETA']})"
 
-    # Mengembalikan deskripsi atau 'Unknown' jika tidak ditemukan
+    cursor.close()
+    return inventory_status
+
+def get_description(part_number):
+    conn = mysql.connection
+    cursor = conn.cursor()
+    query = "SELECT `English Name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
+    cursor.execute(query, (part_number,))
+    result = cursor.fetchone()
+    cursor.close()
     return result['description'] if result else 'Unknown'
 
-# Serve Static Files (Frontend)
-@app.route('/')
-def serve_index():
-    return send_from_directory('../frontend', 'index.html')
+def get_description(part_number):
+    conn = mysql.connection
+    cursor = conn.cursor()
+    query = "SELECT `English Name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
+    cursor.execute(query, (part_number,))
+    result = cursor.fetchone()
+    cursor.close()
+    return result['description'] if result else 'Unknown'
 
-@app.route('/<path:path>')
-def serve_static(path):
-    return send_from_directory('../frontend', path)
-
-# Login Route
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
-
-    if username in users and password == "password":  # Static password for simplicity
-        session['username'] = username
-        response = jsonify({"message": "Login successful!"})
-        response.status_code = 200
+@app.route('/api/check_result', methods=['GET'])
+@login_required
+def get_check_results():
+    try:
+        conn = mysql.connection
+        cursor = conn.cursor()
+        query = """
+        SELECT 
+            c.form_number, c.check_result_item_id, c.submit_date, c.result_date, c.status,
+            c.part_number, c.description, c.quantity, c.order_point, c.end_customer,
+            GROUP_CONCAT(CONCAT(i.location, ': ', i.status) SEPARATOR ', ') AS inventory_status,
+            GROUP_CONCAT(CONCAT(a.alternative_part_number, ' - ', a.alternative_description) SEPARATOR ', ') AS alternative_parts
+        FROM check_results c
+        LEFT JOIN inventory_status i ON c.check_result_item_id = i.check_result_item_id
+        LEFT JOIN alternative_part_numbers a ON c.check_result_item_id = a.check_result_item_id
+        GROUP BY c.check_result_item_id;
+        """
+        cursor.execute(query)
+        results = cursor.fetchall()
+        cursor.close()
+        response = jsonify(results)
+        response.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
+        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
         return response
-    return jsonify({"message": "Invalid credentials."}), 401
-
-# Logout Route
-@app.route('/api/logout', methods=['POST'])
-def logout():
-    session.pop('username', None)
-    return jsonify({"message": "Logged out successfully."}), 200
-
-# Create Form Route
-# @app.route('/api/create_form', methods=['POST'])
-# @login_required
-# def create_form():
-#     data = request.json
-#     items = data.get('items')
-#     username = session.get('username')
-
-#     # Validate items
-#     if not items or len(items) == 0:
-#         return jsonify({"message": "At least one item is required."}), 400
-
-#     # Generate a single Form Number
-#     form_number = generate_form_number(username)
-#     # # (TAMBAHAN API)
-#     # client = KingdeeClient("./conf.ini")
-
-#     # Process each item
-#     for idx, item in enumerate(items):
-#         # # (TAMBAHAN API) update di sini
-#         # client.check_stock_availability(input={
-#         #     'create_org_id': 102,
-#         #     'id': "",
-#         #     'number': item["part_number"]   # sebelumnya 'number': ""   
-#         # })
-
-#         check_result_item_id = f"{form_number}-{idx+1}"
-        
-#         # Ambil inventory status dari database
-#         inventory_status = get_inventory_status(item["part_number"])
-        
-#         # Ambil description dari database `datapn`
-#         description = get_description(item["part_number"])
-
-#          # Cek apakah inventory status sudah muncul (Available atau Not Available)
-#         has_result = any(
-#             status in ["Available", "Not Available"] for status in inventory_status.values()
-#         )
-        
-#         # Jika hasil inventory sudah muncul (baik Available maupun Not Available), set result_date
-#         result_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if has_result else None
-
-#         form = {
-#             "form_number": form_number,
-#             "check_result_item_id": check_result_item_id,
-#             "submit_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-#             "end_customer": item["end_customer"],
-#             "order_point": item["order_point"],
-#             "part_number": item["part_number"],
-#             "description": description,
-#             "quantity": item["quantity"],
-#             "result_date": result_date,
-#             "inventory_status": inventory_status
-#         }
-#         forms.append(form)
-
-#     return jsonify({"message": f"Form {form_number} created successfully with {len(items)} items!", "form_number": form_number}), 201
+        # return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+    
 @app.route('/api/create_form', methods=['POST'])
 @login_required
 def create_form():
@@ -241,115 +173,74 @@ def create_form():
     items = data.get('items')
     username = session.get('username')
 
-    if not items or len(items) == 0:
+    if not items:
         return jsonify({"message": "At least one item is required."}), 400
 
-    # Generate Form Number
-    form_number = generate_form_number(username)
+    form_number = datetime.now().strftime("%d%m%Y") + f"-{users.get(username, '000')}-{int(datetime.timestamp(datetime.now()))}"
 
     try:
-        cur = mysql.connection.cursor()
-
-        # Insert ke tabel `forms`
+        conn = mysql.connection
+        cursor = conn.cursor()
         submit_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cur.execute("INSERT INTO forms (form_number, username, submit_date) VALUES (%s, %s, %s)",
-                    (form_number, username, submit_date))
-        mysql.connection.commit()
 
-        # Insert items ke `form_items`
+        cursor.execute(
+            "INSERT INTO forms (form_number, username, submit_date) VALUES (%s, %s, %s)",
+            (form_number, username, submit_date)
+        )
+
         for idx, item in enumerate(items):
             check_result_item_id = f"{form_number}-{idx+1}"
-
-            # Ambil inventory status dan description dari database
-            inventory_status = get_inventory_status(item["part_number"])
+            inventory_status = get_inventory_status(item["part_number"], item["quantity"])
             description = get_description(item["part_number"])
 
-            has_result = any(status in ["Available", "Not Available"] for status in inventory_status.values())
-            result_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if has_result else None
+            result_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if any(
+                "Available" in s or "Partial" in s for s in inventory_status.values()
+            ) else None
 
-            cur.execute("""
+            cursor.execute("""
                 INSERT INTO form_items 
                 (form_number, check_result_item_id, end_customer, order_point, part_number, description, quantity, result_date, inventory_status) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (form_number, check_result_item_id, item["end_customer"], item["order_point"],
-                  item["part_number"], description, item["quantity"], result_date, str(inventory_status)))
+            """, (
+                form_number, check_result_item_id, item["end_customer"], item["order_point"],
+                item["part_number"], description, item["quantity"], result_date, json.dumps(inventory_status)
+            ))
 
-        mysql.connection.commit()
-        cur.close()
-
-        return jsonify({"message": f"Form {form_number} created successfully with {len(items)} items!", "form_number": form_number}), 201
+        conn.commit()
+        cursor.close()
+        return jsonify({"message": f"Form {form_number} created successfully!", "form_number": form_number}), 201
 
     except Exception as e:
-        mysql.connection.rollback()
+        conn.rollback()
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
 
-# Check Results Route
-@app.route('/api/check_result', methods=['GET'])
-@login_required
-def check_result():
-    result = []
-    for form in forms:
-        result.append({
-            "form_number": form["form_number"],
-            "check_result_item_id": form["check_result_item_id"],
-            "submit_date": form["submit_date"],
-            "result_date": form["result_date"],
-            "status": "Done" if form["result_date"] else "Pending",
-            "end_customer": form["end_customer"],
-            "part_number": form["part_number"],
-            "description": form["description"],
-            "quantity": form["quantity"],
-            "order_point": form["order_point"],
-            "inventory_status": form["inventory_status"]
-        })
-    return jsonify(result), 200
+if __name__ == '__main__':
+    app.run(host="127.0.0.1", port=5000, debug=True)
 
-# Get Form Details Route
-@app.route('/form_details/<form_number>', methods=['GET'])
-@login_required
-def form_details(form_number):
-    # Get all items for the given form_number
-    items = [f for f in forms if f["form_number"] == form_number]
-    if not items:
-        return jsonify({"message": "Form not found"}), 404
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    username, password = data.get('username'), data.get('password')
 
-    return jsonify({
-        "form_number": form_number,
-        "items": [
-            {
-                "check_result_item_id": item["check_result_item_id"],
-                "end_customer": item["end_customer"],
-                "order_point": item["order_point"],
-                "part_number": item["part_number"],
-                "description": item["description"],
-                "quantity": item["quantity"],
-                "result_date": item["result_date"],
-                "inventory_status": item["inventory_status"]
-            }
-            for item in items
-        ]
-    }), 200
+    if username in users and password == "password":
+        session['username'] = username
+        return jsonify({"message": "Login successful!"}), 200
+    return jsonify({"message": "Invalid credentials."}), 401
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.pop('username', None)
+    return jsonify({"message": "Logged out successfully."}), 200
 
 @app.route('/test', methods=['POST'])
 def test_api():
     return jsonify({"message": "API is working!"}), 200
-    
+
 @app.route('/api/check-session', methods=['GET'])
 def check_session():
     if 'username' in session:
-        return jsonify({"message": f"Logged in as {session['username']}"})
-    else:
-        return jsonify({"message": "No active session, please log in."}), 401
-
-# @app.after_request
-# def apply_caching(request):
-
-#     request.headers["Access-Control-Allow-Origin"] = "*"
-#     request.headers["Access-Control-Allow-Headers"] = "Authentication, Content-Type, Content-Length, Content-Encoding, Content-Language, Content-Location"
-#     # request.headers["Access-Control-Allow-Headers"] = "Content-Type, Content-Length, Content-Encoding, Content-Language, Content-Location, Content-Range, Content-Security-Policy, Content-Security-Policy-Report-Only"
-#     request.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, UPDATE, DELETE"
-#     request.headers["Access-Control-Max-Age"] = "86400"
-#     return request
+        return jsonify({"message": f"Logged in as {session['username']}"}), 200
+    return jsonify({"message": "No active session, please log in."}), 401
 
 @app.after_request
 def add_cors_headers(response):
@@ -359,7 +250,5 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Credentials"] = "true"
     return response
 
-
 if __name__ == '__main__':
-    # app.run(debug=True)
     app.run(host="127.0.0.1", port=5000, debug=True)
