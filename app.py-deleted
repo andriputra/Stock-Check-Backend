@@ -117,15 +117,6 @@ def get_description(part_number):
     cursor.close()
     return result['description'] if result else 'Unknown'
 
-def get_description(part_number):
-    conn = mysql.connection
-    cursor = conn.cursor()
-    query = "SELECT `english_name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
-    cursor.execute(query, (part_number,))
-    result = cursor.fetchone()
-    cursor.close()
-    return result['description'] if result else 'Unknown'
-
 @app.route('/api/check_result', methods=['GET'])
 @login_required
 def get_check_results():
