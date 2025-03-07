@@ -5,8 +5,12 @@ import mysql.connector
 from flask_mysqldb import MySQL
 from functools import wraps
 import json
+from flask import session
+from app import db
+from app.models import Customer
 
 app = Flask(__name__)
+
 
 # Konfigurasi database untuk Flask-MySQLdb
 app.config['MYSQL_HOST'] = 'localhost'
@@ -23,16 +27,22 @@ mysql = MySQL(app)
 # CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
 CORS(app, resources={r"/api/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
+
 users = {"admin": "001"}
 forms = []
 
 warehouse_mapping = {
     "Angsana": "IEL-KS-Angsana",
-    "Sofifi": "IEL-MU-SFI",
+    "Bandung": "IEL-MU-BDG",
     "Kendari": "IEL-ST-KDI",
     "Jakarta": "JKT-JAV"
 }
 
+
+with app.app_context():
+    result = Customer.query.filter(Customer.nama.like('%us%')).all()
+    print(result)
+    
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -41,27 +51,6 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# def get_inventory_status(part_number):
-#     conn = mysql.connection
-#     cursor = conn.cursor()
-#     query = """
-#         SELECT `Warehouse Name` AS warehouse, `Inventory Status` AS status
-#         FROM realtimeinventory WHERE `Material Code` = %s
-#     """
-#     cursor.execute(query, (part_number,))
-#     results = cursor.fetchall()
-#     cursor.close()
-
-#     inventory_status = {key: "Not Available" for key in warehouse_mapping}
-
-#     for row in results:
-#         db_warehouse = row['warehouse'].strip()
-#         status = row['status']
-#         for key, value in warehouse_mapping.items():
-#             if db_warehouse == value:
-#                 inventory_status[key] = status
-
-#     return inventory_status
 def get_inventory_status(part_number, quantity):
     conn = mysql.connection
     cursor = conn.cursor()
@@ -70,8 +59,8 @@ def get_inventory_status(part_number, quantity):
 
     # Cek di realtimeinventory
     query = """
-        SELECT `Warehouse Name` AS warehouse, `Inventory Status` AS status, `Available Qty (CUoM)` AS available_qty
-        FROM realtimeinventory WHERE `Material Code` = %s
+        SELECT `warehouse_name` AS warehouse, `inventory_status` AS status, `available_qty` AS available_qty
+        FROM realtimeinventory WHERE `material_code` = %s
     """
     cursor.execute(query, (part_number,))
     results = cursor.fetchall()
@@ -91,30 +80,30 @@ def get_inventory_status(part_number, quantity):
 
     # Jika tidak ditemukan di realtimeinventory, cek di transfermonitoring
     query = """
-        SELECT `DESTINATION WAREHOUSE` AS warehouse, `ETA`
-        FROM transfermonitoring WHERE `PART NUMBER` = %s
+        SELECT `destination_warehouse` AS warehouse, `eta`
+        FROM transfermonitoring WHERE `part_number` = %s
     """
     cursor.execute(query, (part_number,))
     results = cursor.fetchall()
 
     for row in results:
         warehouse = row['warehouse'].strip()
-        eta = row['ETA']
+        eta = row['eta']
 
         for key, value in warehouse_mapping.items():
             if warehouse == value:
-                inventory_status[key] = f"In-transit (ETA = {eta})"
+                inventory_status[key] = f"In-transit (eta = {eta})"
 
     # Jika tidak ditemukan di transfermonitoring, cek di etachina
     query = """
-        SELECT `ETA`
-        FROM etachina WHERE `PART NUMBER` = %s
+        SELECT `eta`
+        FROM etachina WHERE `part_number` = %s
     """
     cursor.execute(query, (part_number,))
     result = cursor.fetchone()
 
     if result:
-        inventory_status["Jakarta"] = f"PO from China (ETA = {result['ETA']})"
+        inventory_status["Jakarta"] = f"PO from China (eta = {result['eta']})"
 
     cursor.close()
     return inventory_status
@@ -122,7 +111,7 @@ def get_inventory_status(part_number, quantity):
 def get_description(part_number):
     conn = mysql.connection
     cursor = conn.cursor()
-    query = "SELECT `English Name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
+    query = "SELECT `english_name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
     cursor.execute(query, (part_number,))
     result = cursor.fetchone()
     cursor.close()
@@ -131,7 +120,7 @@ def get_description(part_number):
 def get_description(part_number):
     conn = mysql.connection
     cursor = conn.cursor()
-    query = "SELECT `English Name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
+    query = "SELECT `english_name` AS description FROM datapn WHERE `code` = %s LIMIT 1"
     cursor.execute(query, (part_number,))
     result = cursor.fetchone()
     cursor.close()
@@ -214,9 +203,6 @@ def create_form():
         conn.rollback()
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host="127.0.0.1", port=5000, debug=True)
-
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
@@ -241,6 +227,58 @@ def check_session():
     if 'username' in session:
         return jsonify({"message": f"Logged in as {session['username']}"}), 200
     return jsonify({"message": "No active session, please log in."}), 401
+
+@app.route('/api/customers', methods=['GET'])
+def search_customers():
+    query = request.args.get('name', '').strip()
+
+    if not query:
+        return jsonify([])  # Jika query kosong, return array kosong
+
+    try:
+        conn = mysql.connection
+        cursor = conn.cursor()
+
+        search_query = """
+        SELECT DISTINCT `nama` FROM customers
+        WHERE `nama` LIKE %s
+        LIMIT 10
+        """
+        cursor.execute(search_query, ('%' + query + '%',))
+        results = cursor.fetchall()
+        cursor.close()
+
+        return jsonify([row['name'] for row in results])
+
+    except Exception as e:
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+    
+@app.route('/api/datapn', methods=['GET'])
+def search_part_numbers():
+    query = request.args.get('code', '').strip()
+
+    if not query:
+        return jsonify([])
+
+    try:
+        conn = mysql.connection
+        cursor = conn.cursor()
+
+        search_query = """
+        SELECT DISTINCT `code`, `english_name` AS description 
+        FROM datapn
+        WHERE `code` LIKE %s
+        LIMIT 10
+        """
+        cursor.execute(search_query, ('%' + query + '%',))
+        results = cursor.fetchall()
+        cursor.close()
+
+        return jsonify([{"code": row["code"], "description": row["description"]} for row in results])
+
+    except Exception as e:
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+
 
 @app.after_request
 def add_cors_headers(response):
