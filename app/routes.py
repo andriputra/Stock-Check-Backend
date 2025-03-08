@@ -132,87 +132,6 @@ def create_form():
         conn.rollback()
         return jsonify({"message": "Internal Server Error", "error": str(e)}), 500
 
-    
-# def get_inventory_status(part_number, quantity):
-#     conn = mysql.connection
-#     cursor = conn.cursor()
-
-#     inventory_status = {key: "Not Available" for key in warehouse_mapping}
-
-#     # Cek di realtimeinventory
-#     query = """
-#         SELECT `warehouse_name` AS warehouse, `inventory_status` AS status, `available_qty` AS available_qty
-#         FROM realtimeinventory WHERE `material_code` = %s
-#     """
-#     cursor.execute(query, (part_number,))
-#     results = cursor.fetchall()
-
-#     for row in results:
-#         warehouse = row['warehouse'].strip()
-#         status = row['status']
-#         available_qty = row['available_qty']
-
-#         for key, value in warehouse_mapping.items():
-#             if warehouse == value:
-#                 if status == "Available":
-#                     if available_qty >= quantity:
-#                         inventory_status[key] = "Available"
-#                     else:
-#                         inventory_status[key] = f"Partial (Stock = {available_qty})"
-
-#     # Jika tidak ditemukan di realtimeinventory, cek di transfermonitoring
-#     query = """
-#         SELECT `destination_warehouse` AS warehouse, `eta`
-#         FROM transfermonitoring WHERE `part_number` = %s
-#     """
-#     cursor.execute(query, (part_number,))
-#     results = cursor.fetchall()
-
-#     for row in results:
-#         warehouse = row['warehouse'].strip()
-#         eta = row['eta']
-
-#         for key, value in warehouse_mapping.items():
-#             if warehouse == value:
-#                 inventory_status[key] = f"In-transit (eta = {eta})"
-
-#     # Jika tidak ditemukan di transfermonitoring, cek di etachina
-#     query = """
-#         SELECT `eta`
-#         FROM etachina WHERE `part_number` = %s
-#     """
-#     cursor.execute(query, (part_number,))
-#     result = cursor.fetchone()
-
-#     if result:
-#         inventory_status["Jakarta"] = f"PO from China (eta = {result['eta']})"
-
-#     cursor.close()
-#     return inventory_status
-# def get_inventory_status(part_number, quantity):
-#     conn = mysql.connection
-#     cursor = conn.cursor()
-    
-#     # Cek di orderrequisition.datapn
-#     query = "SELECT `english_name` FROM orderrequisition.datapn WHERE `code` = %s"
-#     cursor.execute(query, (part_number,))
-#     result = cursor.fetchone()
-#     description = result['english_name'] if result else 'Unknown'
-    
-#     # Cek di realtimeinventory
-#     query = "SELECT `inventory_status` FROM realtimeinventory WHERE `code` = %s"
-#     cursor.execute(query, (part_number,))
-#     result = cursor.fetchone()
-#     cursor.close()
-    
-#     if result:
-#         if result['inventory_status'] == "Available":
-#             return {"status": "Available", "description": description}
-#         elif result['inventory_status'] == "In-Transit":
-#             return {"status": "Not Available", "description": description}
-    
-#     return {"status": "Not Available", "description": description}
-
 def get_inventory_status(part_number, quantity):
     conn = mysql.connection
     cursor = conn.cursor()
@@ -346,3 +265,76 @@ def get_check_result_by_form_number(form_number):
 
     except Exception as e:
         return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+    
+@routes.route('/api/additional_documents', methods=['POST'])
+def create_additional_documents():
+    try:
+        data = request.get_json()
+        print("Data Received:", data)  # Debugging
+
+        if not data or 'items' not in data:
+            return jsonify({'error': 'Invalid request, missing items'}), 400
+
+        items = data['items']
+        if not isinstance(items, list):
+            return jsonify({'error': 'Items must be a list'}), 400
+
+        conn = mysql.connection  # Flask-MySQL connection
+        cursor = conn.cursor()
+
+        for item in items:
+            print("Inserting item:", item)  # Debugging sebelum eksekusi query
+            cursor.execute("""
+                INSERT INTO additional_documents (part_number, description, vin_number, engine_number, unit_type, quantity)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (item["part_number"], item["description"], item["vin_number"], 
+                  item["engine_number"], item["unit_type"], item["quantity"]))
+
+        conn.commit()
+        cursor.close()  # Hanya menutup cursor, bukan koneksi utama
+
+        return jsonify({'message': 'Data inserted successfully', 'data': items}), 201
+    except Exception as e:
+        print("Error inserting data:", str(e))  # Debugging error
+        return jsonify({'error': str(e)}), 500
+
+@routes.route('/api/additional_documents_result', methods=['GET'])
+def get_additional_documents_result():
+    try:
+        conn = mysql.connection
+        cursor = conn.cursor()
+
+        # Ambil parameter pencarian dari query string
+        search_query = request.args.get('search', '')
+
+        # Buat query SQL dengan pencarian (gunakan wildcard % untuk LIKE)
+        if search_query:
+            cursor.execute("""
+                SELECT * FROM additional_documents 
+                WHERE part_number LIKE %s OR description LIKE %s OR 
+                    vin_number LIKE %s OR engine_number LIKE %s OR 
+                    unit_type LIKE %s
+            """, (f"%{search_query}%", f"%{search_query}%", f"%{search_query}%", 
+                f"%{search_query}%", f"%{search_query}%"))
+        else:
+            cursor.execute("SELECT * FROM additional_documents")
+
+        documents = cursor.fetchall()
+        column_names = [desc[0] for desc in cursor.description]
+        documents_list = [dict(zip(column_names, row)) for row in documents]
+
+        cursor.close()
+        conn.close()
+
+        print("Returning data:", documents_list)  # Debugging
+        response = jsonify(documents_list)
+        response.headers.add("Access-Control-Allow-Origin", "http://localhost:3000")
+        response.headers.add("Access-Control-Allow-Methods", "GET, OPTIONS")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.add("Access-Control-Allow-Credentials", "true")
+
+        return response, 200
+    except Exception as e:
+        print("Error fetching data:", str(e))  # Debugging error
+        return jsonify({'error': str(e)}), 500
+
